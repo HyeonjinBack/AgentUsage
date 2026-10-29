@@ -64,7 +64,10 @@ public actor DirectQuotaService {
     init(transport: any QuotaTransport, credentialLoader: any CredentialLoading = LocalCredentialLoader()) {
         self.transport = transport; self.credentialLoader = credentialLoader
     }
-    public func clearCredentials() { credentials.removeAll() }
+    public func clearCredentials(provider: Provider? = nil) {
+        if let provider { credentials = credentials.filter { !$0.key.hasPrefix(provider.rawValue + ":") } }
+        else { credentials.removeAll() }
+    }
     public func fetch(provider: Provider, locations: CredentialLocations = CredentialLocations(), allowKeychainPrompt: Bool = false) async throws -> QuotaSnapshot {
         if let date = retryDates[provider], date > Date() { throw QuotaError.rateLimited }
         let home = provider == .codex ? locations.codexHome : locations.claudeHome
@@ -78,7 +81,7 @@ public actor DirectQuotaService {
         } else {
             if provider == .claude, !allowKeychainPrompt,
                home.standardizedFileURL == FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude").standardizedFileURL {
-                throw QuotaError.credentialAccess
+                throw QuotaError.connectionRequired
             }
             credential = try credentialLoader.read(provider: provider, locations: locations, allowPrompt: allowKeychainPrompt)
             guard credential.expiresAt.map({ $0 > Date() }) ?? true else { throw QuotaError.expiredLogin }
@@ -97,7 +100,7 @@ public actor DirectQuotaService {
         request.httpMethod = "GET"
         request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("AgentMeter/0.2", forHTTPHeaderField: "User-Agent")
+        request.setValue("AgentMeter/0.2.2", forHTTPHeaderField: "User-Agent")
         if provider == .codex, let account = credential.accountID { request.setValue(account, forHTTPHeaderField: "ChatGPT-Account-Id") }
         if provider == .claude { request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta") }
         let result: HTTPResult

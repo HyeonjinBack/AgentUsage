@@ -44,14 +44,27 @@ public struct QuotaSnapshot: Codable, Sendable {
     public var updated: Date
     public var source: String
 }
-public enum QuotaError: String, Error, Sendable {
-    case network, login, expiredLogin, credentialAccess, scope, rateLimited, redirected, server, timeout, invalid, unavailable
+public enum QuotaError: Error, Equatable, Sendable {
+    case network, login, expiredLogin, connectionRequired, credentialAccess, scope, rateLimited, redirected, server, timeout, invalid, unavailable
+    case keychain(Int32)
+    public var rawValue: String {
+        if case .keychain(let status) = self { return "keychain(\(status))" }
+        return String(describing: self)
+    }
+    public var requiresConnection: Bool {
+        switch self {
+        case .login, .expiredLogin, .connectionRequired, .credentialAccess, .scope, .keychain: return true
+        default: return false
+        }
+    }
     public var message: String {
         switch self {
         case .network: return "네트워크 연결을 확인한 뒤 새로고침하세요."
         case .login: return "Codex 또는 Claude Code에서 구독 계정으로 로그인하세요."
         case .expiredLogin: return "로그인이 만료됐습니다. 해당 도구에서 로그인을 갱신하세요."
-        case .credentialAccess: return "로그인 정보 접근이 필요합니다. 설정에서 연결을 허용하세요."
+        case .connectionRequired: return "앱 실행 후 Claude 연결이 필요합니다. 아래 연결 버튼을 눌러 주세요."
+        case .credentialAccess: return "로그인 정보를 읽지 못했습니다. 연결 버튼을 누르고 macOS 키체인 창에서 허용해 주세요."
+        case .keychain(let status): return "macOS 키체인 인증정보를 읽지 못했습니다 (오류 \(status)). Claude 연결 버튼으로 다시 시도해 주세요."
         case .scope: return "한도 조회 접근이 거부됐습니다. 구독 로그인과 계정 권한을 확인하세요."
         case .rateLimited: return "조회 요청이 제한됐습니다. 잠시 후 자동으로 다시 확인합니다."
         case .redirected: return "예상하지 않은 응답 경로입니다. 연결을 중단했습니다."

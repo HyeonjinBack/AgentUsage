@@ -1,13 +1,13 @@
-Codex·Claude 구독의 5시간·주간 잔여 한도와 리셋 시간을 보여주는 macOS 메뉴 막대 앱입니다.
+Codex·Claude 잔여 한도와 Mac 상태를 함께 보여주는 AgentUsage v0.2.2입니다.
 
-- 상단 메뉴 막대: 제공자 아이콘 옆 위쪽에 세션, 아래쪽에 주간 잔여 퍼센트.
-- 한도 3분 조회, 리셋 시간 1분 갱신, 시스템 지표 5초 갱신.
-- 직접 HTTP 연결, 기존 기기의 Codex·Claude Code 로그인 사용.
-- Claude 인증정보는 연결 시 한 번 읽고 메모리에서 재사용. 자동·일반 새로고침에서 키체인 반복 접근 제거.
-- Apple Silicon / macOS 14 이상. 설치 앱 이름은 AgentMeter입니다.
-- 기존 사용자 설정·로그인 파일·계정 정보는 배포 파일에 포함하지 않습니다.
+변경 사항:
+- 상단 바에 CPU 사용률과 메모리 사용 용량을 추가했습니다. 수치는 위, 얇은 게이지는 아래에 표시합니다.
+- 시스템 사용률이 80% 이상이면 해당 게이지만 빨간색으로 바뀝니다.
+- 기존 Codex·Claude의 세션/주간 잔여량 배치와 갱신 주기를 유지합니다.
+- Claude 연결 버튼과 키체인 오류 번호를 추가하고, 자동·일반 새로고침에서 키체인 반복 접근을 제거했습니다.
+- 설정 화면에서 앱 버전을 확인할 수 있습니다.
 
-이 버전은 로컬 ad-hoc 서명이며 Apple 공증이 없습니다. 실시간 계정 조회는 개발 환경의 네트워크·키체인 제한으로 완전히 검증되지 않았습니다. Codex 파일 기반 ChatGPT 로그인과 Claude 기본 키체인/파일 로그인을 지원합니다.
+Apple Silicon / macOS 14 이상을 지원합니다. 설치되는 앱 이름은 AgentMeter입니다. 이 빌드는 ad-hoc 서명이며 Apple 공증이 없습니다. Claude 키체인 허용 창과 일부 계정 연결에는 기기별 추가 확인이 필요할 수 있습니다.
 
 설치:
 
@@ -16,3 +16,5 @@ curl -fL https://github.com/HyeonjinBack/AgentUsage/releases/latest/download/ins
 bash /tmp/agentusage-install.sh
 open "$HOME/Applications/AgentMeter.app"
 ```
+
+개인정보 검사에서 개인 홈 경로·인증 토큰·개인 키가 발견되지 않았습니다. 실제 로그인 파일·계정 데이터·로컬 설정은 배포 파일에 포함하지 않습니다.

@@ -14,7 +14,7 @@ python3 Scripts/privacy-audit.py
 생성 파일은 `dist/release/AgentUsage-macos-arm64.zip`, `install.sh`, `SHA256SUMS`입니다. 소스 저장소에는 빌드 산출물·로그인 파일을 커밋하지 않습니다.
 
 ```sh
-gh release create v0.2.0 dist/release/AgentUsage-macos-arm64.zip dist/release/install.sh dist/release/SHA256SUMS --title 'AgentUsage v0.2.0' --notes-file RELEASE_NOTES.md
+gh release create v0.2.2 dist/release/AgentUsage-macos-arm64.zip dist/release/install.sh dist/release/SHA256SUMS --title 'AgentUsage v0.2.2' --notes-file RELEASE_NOTES.md
 ```
 
 현재 버전은 ad-hoc 서명이고 Apple 공증이 없습니다. 최초 실행이 macOS 보안 정책에 의해 차단될 수 있습니다. 설치 스크립트는 Gatekeeper를 끄거나 quarantine 속성을 제거하지 않습니다. Developer ID 서명·공증 자동화는 후속 작업입니다.

@@ -1,6 +1,5 @@
 import Foundation
 import Security
-import LocalAuthentication
 
 // Intentionally not Codable: credentials never belong in exports or diagnostics.
 struct OAuthCredential {
@@ -39,7 +38,7 @@ enum CredentialReader {
             let defaultHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude").standardizedFileURL
             if locations.claudeHome.standardizedFileURL == defaultHome {
                 // No background Keychain calls at all, including noninteractive probes.
-                guard allowPrompt else { throw QuotaError.credentialAccess }
+                guard allowPrompt else { throw QuotaError.connectionRequired }
                 if let data = try keychain(service: "Claude Code-credentials", allowPrompt: true) {
                     return try decode(data, provider: provider)
                 }
@@ -57,20 +56,20 @@ enum CredentialReader {
         catch { throw QuotaError.credentialAccess }
     }
     private static func keychain(service: String, allowPrompt: Bool) throws -> Data? {
-        let context = LAContext()
-        context.interactionNotAllowed = !allowPrompt
-        defer { context.invalidate() }
+        guard allowPrompt else { throw QuotaError.connectionRequired }
+        // Called only by an explicit connection action. Let legacy generic-password
+        // ACLs use the system's normal authorization UI rather than a fresh LAContext.
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecMatchLimit as String: kSecMatchLimitOne,
-            kSecReturnData as String: true,
-            kSecUseAuthenticationContext as String: context
+            kSecReturnData as String: true
         ]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = result as? Data else { throw QuotaError.credentialAccess }
+        guard status == errSecSuccess else { throw QuotaError.keychain(status) }
+        guard let data = result as? Data else { throw QuotaError.invalid }
         return data
     }
     static func decode(_ data: Data, provider: Provider, now: Date = Date()) throws -> OAuthCredential {

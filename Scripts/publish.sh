@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 root="$PWD"
 repository=HyeonjinBack/AgentUsage
-version=v0.2.0
+version=v0.2.2
 
 gh auth status --hostname github.com
 if gh release view "$version" --repo "$repository" >/dev/null 2>&1; then
@@ -38,7 +38,7 @@ git config user.email 88670321+HyeonjinBack@users.noreply.github.com
 git add -- "${files[@]}"
 git diff --cached --check
 if ! git diff --cached --quiet; then
-    git commit -m "Publish standalone quota monitor and terminal installer"
+    git commit -m "Add CPU and memory menu bar gauges for $version"
 fi
 git -c 'credential.helper=!gh auth git-credential' push origin HEAD:main
 gh release create "$version" \

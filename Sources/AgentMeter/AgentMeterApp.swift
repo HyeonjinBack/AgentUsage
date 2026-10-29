@@ -12,7 +12,7 @@ import AgentMeterCore
 
 @MainActor final class AppModel: ObservableObject {
     @Published var quotas: [Provider: QuotaSnapshot] = [:]
-    @Published var errors: [Provider: String] = [:]
+    @Published var errors: [Provider: QuotaError] = [:]
     @Published var busy = false
     @Published var enabled = UserDefaults.standard.bool(forKey: "directEnabled")
     @Published var paused = false
@@ -32,13 +32,15 @@ import AgentMeterCore
                     if tick.timeIntervalSince(self.now) >= 60 { self.now = tick }
                     // System metrics publish to their own view, not the quota model.
                     self.systemMonitor.capture()
-                    if tick.timeIntervalSince(self.lastFetch) >= 180 { await self.refresh() }
+                    if tick.timeIntervalSince(self.lastFetch) >= 180 {
+                        Task { [weak self] in await self?.refresh() }
+                    }
                 }
                 try? await Task.sleep(for: .seconds(5))
             }
         }
     }
-    func refresh(allowPrompt: Bool = false) async {
+    func refresh(allowPrompt: Bool = false, provider: Provider? = nil) async {
         guard !busy, !paused, enabled else { return }
         busy = true; lastFetch = Date(); defer { busy = false }
         let defaults = UserDefaults.standard
@@ -46,7 +48,7 @@ import AgentMeterCore
         let operation = generation
         let service = service
         await withTaskGroup(of: (Provider, QuotaSnapshot?, QuotaError?).self) { group in
-            for p in Provider.allCases {
+            for p in provider.map({ [$0] }) ?? Provider.allCases {
                 group.addTask {
                     do { return (p, try await service.fetch(provider: p, locations: locations, allowKeychainPrompt: allowPrompt), nil) }
                     catch { return (p, nil, (error as? QuotaError) ?? .unavailable) }
@@ -56,14 +58,16 @@ import AgentMeterCore
                 guard enabled, generation == operation else { continue }
                 if let value { quotas[p] = value; errors[p] = nil }
                 else {
-                    errors[p] = error?.message
-                    if let error, [.login, .expiredLogin, .credentialAccess, .scope].contains(error) { quotas[p] = nil }
+                    // Preserve the actionable result of the last explicit connection.
+                    if error != .connectionRequired || errors[p]?.requiresConnection != true { errors[p] = error }
+                    if error?.requiresConnection == true { quotas[p] = nil }
                 }
             }
         }
     }
     func connect() {
         guard !busy else { return }
+        NSApp.activate(ignoringOtherApps: true)
         generation = UUID()
         UserDefaults.standard.set(codexHome, forKey: "codexHome"); UserDefaults.standard.set(claudeHome, forKey: "claudeHome")
         UserDefaults.standard.set(true, forKey: "directEnabled"); enabled = true
@@ -74,6 +78,15 @@ import AgentMeterCore
         generation = UUID(); enabled = false; quotas = [:]; errors = [:]; systemMonitor.clear()
         UserDefaults.standard.set(false, forKey: "directEnabled")
         Task { await service.clearCredentials() }
+    }
+    func connectClaude() {
+        guard !busy, enabled else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        paused = false
+        Task {
+            await service.clearCredentials(provider: .claude)
+            await refresh(allowPrompt: true, provider: .claude)
+        }
     }
     func bar(_ provider: Provider, minutes: Int) -> String {
         guard errors[provider] == nil, let snapshot = quotas[provider], now.timeIntervalSince(snapshot.updated) < 600,
@@ -88,14 +101,33 @@ import AgentMeterCore
         MenuBarExtra {
             QuotaView(model: model).padding(20).frame(width: 370)
         } label: {
-            Image(nsImage: MenuBarBadge.render(
-                codexSession: model.bar(.codex, minutes: 300), codexWeekly: model.bar(.codex, minutes: 10080),
-                claudeSession: model.bar(.claude, minutes: 300), claudeWeekly: model.bar(.claude, minutes: 10080),
-                codexIcon: BadgeAssets.codex, claudeIcon: BadgeAssets.claude
-            ))
-            .accessibilityLabel("Codex 세션 \(model.bar(.codex, minutes: 300)), 주간 \(model.bar(.codex, minutes: 10080)). Claude 세션 \(model.bar(.claude, minutes: 300)), 주간 \(model.bar(.claude, minutes: 10080))")
+            StatusBarLabel(model: model, monitor: model.systemMonitor)
         }.menuBarExtraStyle(.window)
         Settings { ConnectionView(model: model).padding(24).frame(width: 520) }
+    }
+}
+struct StatusBarLabel: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var monitor: SystemMonitor
+    @Environment(\.colorScheme) private var colorScheme
+    var body: some View {
+        let foreground: NSColor = colorScheme == .dark ? .white : .black
+        let ai = MenuBarBadge.render(
+            codexSession: model.bar(.codex, minutes: 300), codexWeekly: model.bar(.codex, minutes: 10080),
+            claudeSession: model.bar(.claude, minutes: 300), claudeWeekly: model.bar(.claude, minutes: 10080),
+            codexIcon: BadgeAssets.codex, claudeIcon: BadgeAssets.claude
+        )
+        let system = SystemMenuBarBadge.render(cpu: monitor.sample?.cpu, memoryUsed: monitor.sample?.memoryUsed,
+                                             memoryTotal: monitor.sample?.memoryTotal, foreground: foreground)
+        Image(nsImage: SystemMenuBarBadge.combine(ai: ai, system: system, foreground: foreground))
+            .renderingMode(.original)
+            .accessibilityLabel("Codex 세션 \(model.bar(.codex, minutes: 300)), 주간 \(model.bar(.codex, minutes: 10080)). Claude 세션 \(model.bar(.claude, minutes: 300)), 주간 \(model.bar(.claude, minutes: 10080)). \(systemDescription)")
+    }
+    private var systemDescription: String {
+        guard let s = monitor.sample else { return "시스템 지표 측정 중" }
+        let cpu = s.cpu.map { String(format: "CPU %.0f퍼센트 사용", $0) } ?? "CPU 측정 중"
+        let memory = s.memoryUsed >= 0 ? String(format: "메모리 %.1fGB 사용", s.memoryUsed / 1e9) : "메모리 측정 불가"
+        return "\(cpu), \(memory)"
     }
 }
 struct QuotaView: View {
@@ -145,7 +177,14 @@ struct QuotaView: View {
             } else {
                 HStack { Text("5시간  —"); Spacer(); Text("주간  —") }.foregroundStyle(.secondary)
             }
-            if let error = model.errors[provider] { Text(error).font(.caption).foregroundStyle(.orange) }
+            if let error = model.errors[provider] {
+                Text(error.message).font(.caption).foregroundStyle(.orange)
+                if provider == .claude, error.requiresConnection {
+                    Button("Claude 연결 / 인증 다시 읽기") { model.connectClaude() }
+                        .buttonStyle(.bordered).controlSize(.small).disabled(model.busy)
+                        .help("이 버튼을 누를 때만 Claude 키체인 접근을 요청합니다.")
+                }
+            }
         }.padding(14).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
     }
 }
@@ -168,6 +207,8 @@ struct ConnectionView: View {
     var body: some View {
         Form {
             Text("한도 연결").font(.title2.bold())
+            Text("AgentMeter \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "개발 버전")")
+                .font(.caption).foregroundStyle(.secondary)
             Text("Codex·Claude Code에 로그인한 구독 계정을 사용합니다. 인증정보를 새로 저장하거나 외부 CLI를 실행하지 않습니다.").font(.caption).foregroundStyle(.secondary)
             Button("로그인 정보 연결 / 키체인 접근 허용") { model.connect() }.disabled(model.busy)
             Button("연결 해제") { model.disconnect() }

@@ -18,6 +18,12 @@ private final class CountingCredentialLoader: CredentialLoading, @unchecked Send
         calls += 1; return credential
     }
 }
+private final class BlockedCredentialLoader: CredentialLoading, @unchecked Sendable {
+    var calls = 0
+    func read(provider: Provider, locations: CredentialLocations, allowPrompt: Bool) throws -> OAuthCredential {
+        calls += 1; throw QuotaError.keychain(-25308)
+    }
+}
 final class QuotaTests: XCTestCase {
     func data(_ object: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: object) }
     func codex(_ used: Any = 28) throws -> Data {
@@ -107,7 +113,7 @@ final class QuotaTests: XCTestCase {
         let locations = CredentialLocations(claudeHome: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude"))
         for _ in 0..<3 {
             do { _ = try await service.fetch(provider: .claude, locations: locations); XCTFail("Must require explicit connection") }
-            catch { XCTAssertEqual(error as? QuotaError, .credentialAccess) }
+            catch { XCTAssertEqual(error as? QuotaError, .connectionRequired) }
         }
         XCTAssertEqual(loader.calls, 0)
     }
@@ -120,7 +126,7 @@ final class QuotaTests: XCTestCase {
         let requests = await transport.captured(); XCTAssertEqual(requests.count, 5)
         await service.clearCredentials()
         do { _ = try await service.fetch(provider: .claude); XCTFail("Cache was cleared") }
-        catch { XCTAssertEqual(error as? QuotaError, .credentialAccess) }
+        catch { XCTAssertEqual(error as? QuotaError, .connectionRequired) }
         XCTAssertEqual(loader.calls, 1)
     }
     func testUnauthorizedDoesNotTriggerKeychainRetry() async throws {
@@ -129,7 +135,7 @@ final class QuotaTests: XCTestCase {
         do { _ = try await service.fetch(provider: .claude, allowKeychainPrompt: true); XCTFail("401") }
         catch { XCTAssertEqual(error as? QuotaError, .expiredLogin) }
         do { _ = try await service.fetch(provider: .claude); XCTFail("No background credential retry") }
-        catch { XCTAssertEqual(error as? QuotaError, .credentialAccess) }
+        catch { XCTAssertEqual(error as? QuotaError, .connectionRequired) }
         XCTAssertEqual(loader.calls, 1)
     }
     func testExpiredCredentialDoesNotSendHTTPOrRetryKeychain() async throws {
@@ -138,8 +144,20 @@ final class QuotaTests: XCTestCase {
         do { _ = try await service.fetch(provider: .claude, allowKeychainPrompt: true); XCTFail("Expired credential") }
         catch { XCTAssertEqual(error as? QuotaError, .expiredLogin) }
         do { _ = try await service.fetch(provider: .claude); XCTFail("No background credential retry") }
-        catch { XCTAssertEqual(error as? QuotaError, .credentialAccess) }
+        catch { XCTAssertEqual(error as? QuotaError, .connectionRequired) }
         XCTAssertEqual(loader.calls, 1)
         let requests = await transport.captured(); XCTAssertTrue(requests.isEmpty)
+    }
+    func testExplicitConnectionExposesKeychainStatusWithoutBackgroundRetry() async throws {
+        let loader = BlockedCredentialLoader()
+        let service = DirectQuotaService(transport: StubTransport(data: try claude()), credentialLoader: loader)
+        do { _ = try await service.fetch(provider: .claude, allowKeychainPrompt: true); XCTFail("Expected Keychain failure") }
+        catch {
+            XCTAssertEqual(error as? QuotaError, .keychain(-25308))
+            XCTAssertTrue((error as? QuotaError)?.message.contains("-25308") == true)
+        }
+        do { _ = try await service.fetch(provider: .claude); XCTFail("No background retry") }
+        catch { XCTAssertEqual(error as? QuotaError, .connectionRequired) }
+        XCTAssertEqual(loader.calls, 1)
     }
 }
