@@ -1,0 +1,12 @@
+name: Check
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - run: swift test
+      - run: bash Scripts/build-app.sh
+      - run: python3 Scripts/privacy-audit.py
