@@ -1,7 +1,7 @@
 import AppKit
 
 enum SystemMenuBarBadge {
-    static let width: CGFloat = 160
+    static let width: CGFloat = 122
     static let warningThreshold = 0.8
 
     static func render(cpu: Double?, memoryUsed: Double?, memoryTotal: Double?, foreground: NSColor) -> NSImage {
@@ -14,11 +14,7 @@ enum SystemMenuBarBadge {
         let cpuText = cpuFraction.map { String(format: "CPU %.0f%%", $0 * 100) } ?? "CPU —"
         let memoryText = memoryFraction.flatMap { _ in memoryUsed }.map { String(format: "Mem %.1fG", $0 / 1e9) } ?? "Mem —"
         let image = NSImage(size: NSSize(width: width, height: 22), flipped: false) { _ in
-            func metric(symbol: String, iconX: CGFloat, textX: CGFloat, trackWidth: CGFloat, title: String, value: Double?) {
-                let icon = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-                if let icon {
-                    tinted(icon, color: foreground).draw(in: NSRect(x: iconX, y: 4, width: 14, height: 14))
-                }
+            func metric(textX: CGFloat, trackWidth: CGFloat, title: String, value: Double?) {
                 let attributes: [NSAttributedString.Key: Any] = [
                     .font: NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .semibold),
                     .foregroundColor: foreground
@@ -33,8 +29,8 @@ enum SystemMenuBarBadge {
                     NSBezierPath(roundedRect: fill, xRadius: 1, yRadius: 1).fill()
                 }
             }
-            metric(symbol: "cpu", iconX: 0, textX: 19, trackWidth: 45, title: cpuText, value: cpuFraction)
-            metric(symbol: "memorychip", iconX: 76, textX: 95, trackWidth: 64, title: memoryText, value: memoryFraction)
+            metric(textX: 0, trackWidth: 45, title: cpuText, value: cpuFraction)
+            metric(textX: 57, trackWidth: 64, title: memoryText, value: memoryFraction)
             return true
         }
         image.isTemplate = false // Preserve the red gauge fill.

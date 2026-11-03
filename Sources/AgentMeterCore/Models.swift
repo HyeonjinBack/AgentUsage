@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 public enum Provider: String, Codable, CaseIterable, Sendable {
     case codex, claude
     public var title: String { self == .codex ? "Codex" : "Claude Code" }
@@ -29,13 +30,13 @@ public struct QuotaWindow: Codable, Equatable, Identifiable, Sendable {
     }
     public func expired(at now: Date) -> Bool { resetsAt.map { $0 <= now } ?? false }
     public func countdown(at now: Date) -> String {
-        guard let resetsAt else { return "리셋 시각 미제공" }
+        guard let resetsAt else { return "초기화 시각 미제공" }
         let seconds = resetsAt.timeIntervalSince(now)
-        guard seconds > 0 else { return "리셋 시각 경과 · 갱신 필요" }
+        guard seconds > 0 else { return "초기화 시각 경과 · 갱신 필요" }
         let minutes = Int(ceil(seconds / 60)); let hours = minutes / 60
-        if hours >= 24 { return "\(hours / 24)일 \(hours % 24)시간 후 리셋" }
-        if hours > 0 { return "\(hours)시간 \(minutes % 60)분 후 리셋" }
-        return "\(minutes)분 후 리셋"
+        // Keep total hours visible for weekly limits, including the remaining minutes.
+        if hours > 0 { return "\(hours)시간 \(minutes % 60)분 남음" }
+        return "\(minutes)분 남음"
     }
 }
 public struct QuotaSnapshot: Codable, Sendable {
@@ -43,6 +44,40 @@ public struct QuotaSnapshot: Codable, Sendable {
     public var windows: [QuotaWindow]
     public var updated: Date
     public var source: String
+    public var resetCredits: RateLimitResetCredits? = nil
+    public var resetCreditsError: String? = nil
+}
+
+public struct RateLimitResetCredit: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public let resetType: String
+    public let status: String
+    public let expiresAt: Date?
+
+    public var title: String { resetType == "codex_rate_limits" ? "전체 한도 초기화" : "초기화 쿠폰" }
+    public func countdown(at now: Date) -> String {
+        guard let expiresAt else { return "만료 시각 미제공" }
+        let seconds = expiresAt.timeIntervalSince(now)
+        guard seconds > 0 else { return "유효기간 만료 · 갱신 필요" }
+        let minutes = Int(ceil(seconds / 60))
+        return minutes >= 60 ? "\(minutes / 60)시간 \(minutes % 60)분 남음" : "\(minutes)분 남음"
+    }
+}
+
+public struct RateLimitResetCredits: Codable, Equatable, Sendable {
+    // The service can return fewer detail rows than the available count.
+    public let availableCount: Int
+    public let credits: [RateLimitResetCredit]?
+    public var availableCredits: [RateLimitResetCredit] {
+        (credits ?? []).filter { $0.status == "available" }.sorted {
+            let first = $0.expiresAt ?? .distantFuture
+            let second = $1.expiresAt ?? .distantFuture
+            return first == second ? $0.id < $1.id : first < second
+        }
+    }
+    public var completeExpiryDetails: Bool {
+        availableCredits.count == availableCount && availableCredits.allSatisfy { $0.expiresAt != nil }
+    }
 }
 public enum QuotaError: Error, Equatable, Sendable {
     case network, login, expiredLogin, connectionRequired, credentialAccess, scope, rateLimited, redirected, server, timeout, invalid, unavailable
@@ -76,7 +111,11 @@ public enum QuotaError: Error, Equatable, Sendable {
     }
 }
 func quotaDate(_ value: Any?) -> Date? {
-    if let n = value as? NSNumber { return Date(timeIntervalSince1970: n.doubleValue) }
+    if let n = value as? NSNumber {
+        guard CFGetTypeID(n) != CFBooleanGetTypeID(), n.doubleValue.isFinite,
+              (Date.distantPast.timeIntervalSince1970...Date.distantFuture.timeIntervalSince1970).contains(n.doubleValue) else { return nil }
+        return Date(timeIntervalSince1970: n.doubleValue)
+    }
     guard let text = value as? String else { return nil }
     let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return f.date(from: text) ?? ISO8601DateFormatter().date(from: text)

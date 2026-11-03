@@ -52,8 +52,27 @@ final class QuotaTests: XCTestCase {
     }
     func testCountdownAndExpired() {
         let w = QuotaWindow(id:"x",minutes:300,used:100,resetsAt:Date(timeIntervalSince1970:7260))
-        XCTAssertEqual(w.countdown(at:Date(timeIntervalSince1970:0)),"2시간 1분 후 리셋")
+        XCTAssertEqual(w.countdown(at:Date(timeIntervalSince1970:0)),"2시간 1분 남음")
         XCTAssertTrue(w.expired(at:Date(timeIntervalSince1970:7260))); XCTAssertEqual(w.remaining,0)
+    }
+    func testWeeklyCountdownKeepsTotalHoursAndMinutes() {
+        let now = Date(timeIntervalSince1970: 0)
+        let window = QuotaWindow(id: "weekly", minutes: 10080, used: 40,
+                                 resetsAt: now.addingTimeInterval(49 * 3600 + 17 * 60))
+        XCTAssertEqual(window.countdown(at: now), "49시간 17분 남음")
+        XCTAssertEqual(window.countdown(at: now.addingTimeInterval(60)), "49시간 16분 남음")
+    }
+    func testCountdownMinuteRoundingAndResetBoundary() {
+        let now = Date(timeIntervalSince1970: 0)
+        for (seconds, expected) in [(1.0, "1분 남음"), (59.0, "1분 남음"), (60.0, "1분 남음"),
+                                    (61.0, "2분 남음"), (3600.0, "1시간 0분 남음"),
+                                    (86400.0, "24시간 0분 남음"),
+                                    (0.0, "초기화 시각 경과 · 갱신 필요"), (-60.0, "초기화 시각 경과 · 갱신 필요")] {
+            let window = QuotaWindow(id: "session", minutes: 300, used: 100, resetsAt: now.addingTimeInterval(seconds))
+            XCTAssertEqual(window.countdown(at: now), expected)
+        }
+        let missing = QuotaWindow(id: "session", minutes: 300, used: 20, resetsAt: nil)
+        XCTAssertEqual(missing.countdown(at: now), "초기화 시각 미제공")
     }
     func testInvalidBody() { XCTAssertThrowsError(try QuotaClient.decode(Data("html".utf8),provider:.codex)) }
     func testCredentialsAreProjectedWithoutRefreshToken() throws {

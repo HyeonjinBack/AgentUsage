@@ -6,7 +6,8 @@ enum MenuBarBadge {
                        codexIcon: NSImage?, claudeIcon: NSImage?) -> NSImage {
         let image = NSImage(size: NSSize(width: 118, height: 22), flipped: false) { _ in
             func group(icon: NSImage?, x: CGFloat, session: String, weekly: String) {
-                icon?.draw(in: NSRect(x: x, y: 3, width: 16, height: 16), from: .zero, operation: .sourceOver, fraction: 1)
+                // Keep the original slot and percentage positions; shrink only the artwork.
+                icon?.draw(in: NSRect(x: x + 1, y: 4, width: 14, height: 14), from: .zero, operation: .sourceOver, fraction: 1)
                 for (text, y) in [(session, CGFloat(11)), (weekly, CGFloat(0))] {
                     let attributes: [NSAttributedString.Key: Any] = [
                         .font: NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .semibold),

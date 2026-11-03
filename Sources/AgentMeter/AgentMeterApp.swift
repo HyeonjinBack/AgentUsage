@@ -26,14 +26,16 @@ import AgentMeterCore
     init() {
         Task { [weak self] in
             while !Task.isCancelled {
-                if let self, self.enabled, !self.paused {
+                if let self, self.enabled {
                     let tick = Date()
                     // Only this minute tick invalidates the quota countdown views.
                     if tick.timeIntervalSince(self.now) >= 60 { self.now = tick }
                     // System metrics publish to their own view, not the quota model.
-                    self.systemMonitor.capture()
-                    if tick.timeIntervalSince(self.lastFetch) >= 180 {
-                        Task { [weak self] in await self?.refresh() }
+                    if !self.paused {
+                        self.systemMonitor.capture()
+                        if tick.timeIntervalSince(self.lastFetch) >= 180 {
+                            Task { [weak self] in await self?.refresh() }
+                        }
                     }
                 }
                 try? await Task.sleep(for: .seconds(5))
@@ -42,6 +44,7 @@ import AgentMeterCore
     }
     func refresh(allowPrompt: Bool = false, provider: Provider? = nil) async {
         guard !busy, !paused, enabled else { return }
+        now = Date()
         busy = true; lastFetch = Date(); defer { busy = false }
         let defaults = UserDefaults.standard
         let locations = CredentialLocations(codexHome: defaults.string(forKey: "codexHome").map { URL(fileURLWithPath: $0) }, claudeHome: defaults.string(forKey: "claudeHome").map { URL(fileURLWithPath: $0) })
@@ -109,13 +112,14 @@ import AgentMeterCore
 struct StatusBarLabel: View {
     @ObservedObject var model: AppModel
     @ObservedObject var monitor: SystemMonitor
+    @AppStorage("claudeIconStyle") private var claudeIconStyle: ClaudeIconStyle = .logo
     @Environment(\.colorScheme) private var colorScheme
     var body: some View {
         let foreground: NSColor = colorScheme == .dark ? .white : .black
         let ai = MenuBarBadge.render(
             codexSession: model.bar(.codex, minutes: 300), codexWeekly: model.bar(.codex, minutes: 10080),
             claudeSession: model.bar(.claude, minutes: 300), claudeWeekly: model.bar(.claude, minutes: 10080),
-            codexIcon: BadgeAssets.codex, claudeIcon: BadgeAssets.claude
+            codexIcon: BadgeAssets.codex, claudeIcon: claudeIconStyle.image
         )
         let system = SystemMenuBarBadge.render(cpu: monitor.sample?.cpu, memoryUsed: monitor.sample?.memoryUsed,
                                              memoryTotal: monitor.sample?.memoryTotal, foreground: foreground)
@@ -160,18 +164,11 @@ struct QuotaView: View {
             HStack { Text(provider.title).font(.headline); Spacer(); if stale { Text("이전 값").font(.caption).foregroundStyle(.orange) } }
             if let snapshot {
                 ForEach(snapshot.windows) { window in
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack {
-                            Text(window.title).font(.subheadline)
-                            Spacer()
-                            Text(window.expired(at: model.now) ? "갱신 필요" : String(format: "%.0f%% 남음", window.remaining)).font(.system(.headline, design: .rounded)).monospacedDigit()
-                        }
-                        if !window.expired(at: model.now) {
-                            ProgressView(value: window.remaining, total: 100).tint(stale ? .gray : window.remaining < 20 ? .orange : .teal)
-                        }
-                        Text(window.countdown(at: model.now)).font(.caption).foregroundStyle(.secondary)
-                        if let reset = window.resetsAt { Text(reset.formatted(date: .abbreviated, time: .shortened)).font(.caption2).foregroundStyle(.tertiary) }
-                    }
+                    QuotaWindowView(window: window, now: model.now, stale: stale)
+                }
+                if provider == .codex {
+                    Divider()
+                    ResetCreditsView(credits: snapshot.resetCredits, errorMessage: snapshot.resetCreditsError, now: model.now)
                 }
                 Text("\(snapshot.updated.formatted(date: .omitted, time: .standard)) 확인 · \(snapshot.source)").font(.caption2).foregroundStyle(.secondary)
             } else {
@@ -204,6 +201,7 @@ struct SystemMetricsView: View {
 }
 struct ConnectionView: View {
     @ObservedObject var model: AppModel
+    @AppStorage("claudeIconStyle") private var claudeIconStyle: ClaudeIconStyle = .logo
     var body: some View {
         Form {
             Text("한도 연결").font(.title2.bold())
@@ -218,7 +216,23 @@ struct ConnectionView: View {
                 Text("사용자 지정 Claude 폴더는 해당 폴더의 로그인 파일을 읽습니다. 기본 Claude 프로필은 macOS 키체인을 사용합니다.").font(.caption)
             }
             Divider()
-            Text("3분마다 한도를 조회합니다. 메뉴 막대는 각 아이콘 오른쪽 위에 세션 잔여량, 아래에 주간 잔여량을 표시합니다. 10분 이상 지난 값이나 조회 실패는 — 로 표시합니다. 이 버전은 이력을 저장하지 않습니다.").font(.caption).foregroundStyle(.secondary)
+            Text("메뉴 막대 모양").font(.headline)
+            Picker("Claude 아이콘", selection: $claudeIconStyle) {
+                ForEach(ClaudeIconStyle.allCases) { style in
+                    HStack(spacing: 8) {
+                        if let image = style.image {
+                            Image(nsImage: image).renderingMode(.template)
+                                .resizable().scaledToFit().frame(width: 18, height: 18)
+                        }
+                        Text(style.title)
+                    }.tag(style)
+                }
+            }
+            .pickerStyle(.radioGroup)
+            Text("선택한 아이콘은 메뉴 막대에 바로 적용되며 다음 실행에도 유지됩니다.")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            Text("3분마다 한도를 조회합니다. 메뉴 막대는 각 아이콘 오른쪽 위에 세션 잔여량, 아래에 주간 잔여량을 표시합니다. 상세 화면의 초기화까지 남은 시간은 1분마다 갱신하며, 다음 초기화 시각은 Mac의 시간대로 표시합니다. 10분 이상 지난 값이나 조회 실패는 — 로 표시합니다. 이 버전은 이력을 저장하지 않습니다.").font(.caption).foregroundStyle(.secondary)
             Text("로그인이 만료되면 Codex·Claude Code에서 갱신한 뒤 새로고침하세요. 자동 조회와 새로고침은 기본 Claude 프로필의 키체인에 접근하지 않습니다. 인증 갱신은 위 연결 버튼에서만 수행합니다.").font(.caption).foregroundStyle(.secondary)
         }
     }

@@ -23,6 +23,28 @@ public enum QuotaClient {
         guard !windows.isEmpty else { throw QuotaError.unavailable }
         return QuotaSnapshot(provider: provider, windows: windows, updated: now, source: provider == .codex ? "ChatGPT 직접 연결" : "Claude 직접 연결")
     }
+    public static func decodeResetCredits(_ data: Data) throws -> RateLimitResetCredits {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let value = number(root["available_count"]), let count = Int(exactly: value), count >= 0 else {
+            throw QuotaError.invalid
+        }
+        let credits: [RateLimitResetCredit]?
+        if root["credits"] == nil || root["credits"] is NSNull {
+            credits = nil
+        } else if let rows = root["credits"] as? [[String: Any]] {
+            var seen: Set<String> = []
+            credits = rows.compactMap { row in
+                guard let id = row["id"] as? String, !id.isEmpty,
+                      let resetType = row["reset_type"] as? String,
+                      let status = row["status"] as? String, seen.insert(id).inserted else { return nil }
+                return RateLimitResetCredit(id: id, resetType: resetType, status: status,
+                                            expiresAt: quotaDate(row["expires_at"]))
+            }
+        } else {
+            throw QuotaError.invalid
+        }
+        return RateLimitResetCredits(availableCount: count, credits: credits)
+    }
     private static func number(_ value: Any?) -> Double? {
         guard let n = value as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(), n.doubleValue.isFinite else { return nil }
         return n.doubleValue
@@ -60,6 +82,7 @@ public actor DirectQuotaService {
     private let credentialLoader: any CredentialLoading
     private var credentials: [String: OAuthCredential] = [:]
     private var retryDates: [Provider: Date] = [:]
+    private var resetCreditRetryDate: Date?
     public init() { transport = DirectTransport(); credentialLoader = LocalCredentialLoader() }
     init(transport: any QuotaTransport, credentialLoader: any CredentialLoading = LocalCredentialLoader()) {
         self.transport = transport; self.credentialLoader = credentialLoader
@@ -96,25 +119,60 @@ public actor DirectQuotaService {
     func fetch(provider: Provider, credential: OAuthCredential) async throws -> QuotaSnapshot {
         if let date = retryDates[provider], date > Date() { throw QuotaError.rateLimited }
         let endpoint = provider == .codex ? "https://chatgpt.com/backend-api/wham/usage" : "https://api.anthropic.com/api/oauth/usage"
-        var request = URLRequest(url: URL(string: endpoint)!)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("AgentMeter/0.2.2", forHTTPHeaderField: "User-Agent")
-        if provider == .codex, let account = credential.accountID { request.setValue(account, forHTTPHeaderField: "ChatGPT-Account-Id") }
-        if provider == .claude { request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta") }
+        let request = makeRequest(endpoint: endpoint, provider: provider, credential: credential)
         let result: HTTPResult
         do { result = try await transport.send(request) }
         catch let e as QuotaError { throw e }
         catch let e as URLError { throw e.code == .timedOut ? QuotaError.timeout : QuotaError.network }
         catch { throw QuotaError.network }
         switch result.status {
-        case 200: return try QuotaClient.decode(result.data, provider: provider)
+        case 200:
+            var snapshot = try QuotaClient.decode(result.data, provider: provider)
+            if provider == .codex {
+                do { snapshot.resetCredits = try await fetchResetCredits(credential: credential) }
+                catch { snapshot.resetCreditsError = ((error as? QuotaError) ?? .unavailable).message }
+            }
+            return snapshot
         case 401: throw QuotaError.expiredLogin
         case 403: throw QuotaError.scope
         case 429:
             let delay = Double(result.retryAfter ?? "") ?? 300
             retryDates[provider] = Date().addingTimeInterval(min(3600, max(30, delay)))
+            throw QuotaError.rateLimited
+        case 300..<400: throw QuotaError.redirected
+        case 500..<600: throw QuotaError.server
+        default: throw QuotaError.unavailable
+        }
+    }
+
+    private func makeRequest(endpoint: String, provider: Provider, credential: OAuthCredential) -> URLRequest {
+        var request = URLRequest(url: URL(string: endpoint)!)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("AgentMeter/0.2.6", forHTTPHeaderField: "User-Agent")
+        if provider == .codex, let account = credential.accountID { request.setValue(account, forHTTPHeaderField: "ChatGPT-Account-Id") }
+        if provider == .claude { request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta") }
+        return request
+    }
+
+    private func fetchResetCredits(credential: OAuthCredential) async throws -> RateLimitResetCredits {
+        if let retry = resetCreditRetryDate, retry > Date() { throw QuotaError.rateLimited }
+        // Read-only details endpoint used by Codex. Never call the /consume route.
+        let request = makeRequest(endpoint: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+                                  provider: .codex, credential: credential)
+        let result: HTTPResult
+        do { result = try await transport.send(request) }
+        catch let error as QuotaError { throw error }
+        catch let error as URLError { throw error.code == .timedOut ? QuotaError.timeout : QuotaError.network }
+        catch { throw QuotaError.network }
+        switch result.status {
+        case 200: return try QuotaClient.decodeResetCredits(result.data)
+        case 401: throw QuotaError.expiredLogin
+        case 403: throw QuotaError.scope
+        case 429:
+            let delay = Double(result.retryAfter ?? "") ?? 300
+            resetCreditRetryDate = Date().addingTimeInterval(min(3600, max(30, delay)))
             throw QuotaError.rateLimited
         case 300..<400: throw QuotaError.redirected
         case 500..<600: throw QuotaError.server
