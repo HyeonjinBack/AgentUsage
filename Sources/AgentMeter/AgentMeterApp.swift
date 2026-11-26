@@ -11,18 +11,28 @@ import AgentMeterCore
 }
 
 @MainActor final class AppModel: ObservableObject {
+    private struct Request {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+
     @Published var quotas: [Provider: QuotaSnapshot] = [:]
     @Published var errors: [Provider: QuotaError] = [:]
-    @Published var busy = false
+    @Published private var requests: [Provider: Request] = [:]
+    @Published private(set) var selectedProviders = Provider.allCases.filter {
+        UserDefaults.standard.object(forKey: "trackProvider.\($0.rawValue)") as? Bool ?? true
+    }
     @Published var enabled = UserDefaults.standard.bool(forKey: "directEnabled")
     @Published var paused = false
     @Published var now = Date()
     @Published var codexHome = UserDefaults.standard.string(forKey: "codexHome") ?? CredentialLocations().codexHome.path
     @Published var claudeHome = UserDefaults.standard.string(forKey: "claudeHome") ?? CredentialLocations().claudeHome.path
     private let service = DirectQuotaService()
-    private var generation = UUID()
+    private var credentialCleanup: Task<Void, Never>?
     let systemMonitor = SystemMonitor()
-    private var lastFetch = Date.distantPast
+    private var lastFetch: [Provider: Date] = [:]
+    var busy: Bool { !requests.isEmpty }
+
     init() {
         Task { [weak self] in
             while !Task.isCancelled {
@@ -33,8 +43,9 @@ import AgentMeterCore
                     // System metrics publish to their own view, not the quota model.
                     if !self.paused {
                         self.systemMonitor.capture()
-                        if tick.timeIntervalSince(self.lastFetch) >= 180 {
-                            Task { [weak self] in await self?.refresh() }
+                        for provider in self.selectedProviders
+                        where tick.timeIntervalSince(self.lastFetch[provider] ?? .distantPast) >= 180 {
+                            self.refresh(provider: provider)
                         }
                     }
                 }
@@ -42,54 +53,91 @@ import AgentMeterCore
             }
         }
     }
-    func refresh(allowPrompt: Bool = false, provider: Provider? = nil) async {
-        guard !busy, !paused, enabled else { return }
+    func setTracking(_ provider: Provider, enabled: Bool) {
+        guard selectedProviders.contains(provider) != enabled else { return }
+        UserDefaults.standard.set(enabled, forKey: "trackProvider.\(provider.rawValue)")
+        if enabled {
+            selectedProviders = Provider.allCases.filter { $0 == provider || selectedProviders.contains($0) }
+            refresh(provider: provider)
+        } else {
+            selectedProviders.removeAll { $0 == provider }
+            requests.removeValue(forKey: provider)?.task.cancel()
+            quotas.removeValue(forKey: provider)
+            errors.removeValue(forKey: provider)
+            lastFetch.removeValue(forKey: provider)
+            clearCachedCredentials(for: provider)
+        }
+    }
+    private func clearCachedCredentials(for provider: Provider? = nil) {
+        credentialCleanup = Task { [service, previous = credentialCleanup] in
+            await previous?.value
+            await service.clearCredentials(provider: provider)
+        }
+    }
+    func refresh(allowPrompt: Bool = false, provider: Provider? = nil) {
+        guard !paused, enabled else { return }
+        let targets = selectedProviders.filter {
+            (provider == nil || provider == $0) && requests[$0] == nil
+        }
+        guard !targets.isEmpty else { return }
         now = Date()
-        busy = true; lastFetch = Date(); defer { busy = false }
         let defaults = UserDefaults.standard
         let locations = CredentialLocations(codexHome: defaults.string(forKey: "codexHome").map { URL(fileURLWithPath: $0) }, claudeHome: defaults.string(forKey: "claudeHome").map { URL(fileURLWithPath: $0) })
-        let operation = generation
-        let service = service
-        await withTaskGroup(of: (Provider, QuotaSnapshot?, QuotaError?).self) { group in
-            for p in provider.map({ [$0] }) ?? Provider.allCases {
-                group.addTask {
-                    do { return (p, try await service.fetch(provider: p, locations: locations, allowKeychainPrompt: allowPrompt), nil) }
-                    catch { return (p, nil, (error as? QuotaError) ?? .unavailable) }
+        for target in targets {
+            let id = UUID()
+            lastFetch[target] = now
+            let task = Task { [weak self, service, credentialCleanup] in
+                let result: Result<QuotaSnapshot, QuotaError>
+                do {
+                    await credentialCleanup?.value
+                    try Task.checkCancellation()
+                    if allowPrompt { await service.clearCredentials(provider: target) }
+                    let snapshot = try await service.fetch(provider: target, locations: locations, allowKeychainPrompt: allowPrompt)
+                    result = .success(snapshot)
+                } catch {
+                    result = .failure((error as? QuotaError) ?? .unavailable)
                 }
+                guard let self, self.requests[target]?.id == id else { return }
+                self.requests[target] = nil
+                self.apply(result, for: target)
             }
-            for await (p, value, error) in group {
-                guard enabled, generation == operation else { continue }
-                if let value { quotas[p] = value; errors[p] = nil }
-                else {
-                    // Preserve the actionable result of the last explicit connection.
-                    if error != .connectionRequired || errors[p]?.requiresConnection != true { errors[p] = error }
-                    if error?.requiresConnection == true { quotas[p] = nil }
-                }
+            requests[target] = Request(id: id, task: task)
+        }
+    }
+    private func apply(_ result: Result<QuotaSnapshot, QuotaError>, for provider: Provider) {
+        switch result {
+        case .success(let snapshot):
+            quotas[provider] = snapshot
+            errors[provider] = nil
+        case .failure(let error):
+            // Preserve the actionable result of the last explicit connection.
+            if error != .connectionRequired || errors[provider]?.requiresConnection != true {
+                errors[provider] = error
             }
+            if error.requiresConnection { quotas[provider] = nil }
         }
     }
     func connect() {
-        guard !busy else { return }
-        NSApp.activate(ignoringOtherApps: true)
-        generation = UUID()
+        guard !busy, !selectedProviders.isEmpty else { return }
+        if selectedProviders.contains(.claude) { NSApp.activate(ignoringOtherApps: true) }
         UserDefaults.standard.set(codexHome, forKey: "codexHome"); UserDefaults.standard.set(claudeHome, forKey: "claudeHome")
         UserDefaults.standard.set(true, forKey: "directEnabled"); enabled = true
         paused = false; quotas = [:]; errors = [:]
-        Task { await service.clearCredentials(); await refresh(allowPrompt: true) }
+        refresh(allowPrompt: true)
     }
     func disconnect() {
-        generation = UUID(); enabled = false; quotas = [:]; errors = [:]; systemMonitor.clear()
+        for request in requests.values { request.task.cancel() }
+        requests.removeAll()
+        lastFetch.removeAll()
+        enabled = false; quotas = [:]; errors = [:]; systemMonitor.clear()
         UserDefaults.standard.set(false, forKey: "directEnabled")
-        Task { await service.clearCredentials() }
+        clearCachedCredentials()
     }
     func connectClaude() {
-        guard !busy, enabled else { return }
+        guard enabled, selectedProviders.contains(.claude), requests[.claude] == nil else { return }
         NSApp.activate(ignoringOtherApps: true)
         paused = false
-        Task {
-            await service.clearCredentials(provider: .claude)
-            await refresh(allowPrompt: true, provider: .claude)
-        }
+        refresh(allowPrompt: true, provider: .claude)
     }
     func bar(_ provider: Provider, minutes: Int) -> String {
         guard errors[provider] == nil, let snapshot = quotas[provider], now.timeIntervalSince(snapshot.updated) < 600,
@@ -116,16 +164,22 @@ struct StatusBarLabel: View {
     @Environment(\.colorScheme) private var colorScheme
     var body: some View {
         let foreground: NSColor = colorScheme == .dark ? .white : .black
-        let ai = MenuBarBadge.render(
-            codexSession: model.bar(.codex, minutes: 300), codexWeekly: model.bar(.codex, minutes: 10080),
-            claudeSession: model.bar(.claude, minutes: 300), claudeWeekly: model.bar(.claude, minutes: 10080),
-            codexIcon: BadgeAssets.codex, claudeIcon: claudeIconStyle.image
-        )
+        let groups = model.selectedProviders.map { provider in
+            MenuBarBadge.Group(session: model.bar(provider, minutes: 300),
+                               weekly: model.bar(provider, minutes: 10080),
+                               icon: provider == .codex ? BadgeAssets.codex : claudeIconStyle.image)
+        }
+        let quotaDescriptions = model.selectedProviders.map { provider in
+            "\(provider.title) 세션 \(model.bar(provider, minutes: 300)), 주간 \(model.bar(provider, minutes: 10080))"
+        }
         let system = SystemMenuBarBadge.render(cpu: monitor.sample?.cpu, memoryUsed: monitor.sample?.memoryUsed,
                                              memoryTotal: monitor.sample?.memoryTotal, foreground: foreground)
-        Image(nsImage: SystemMenuBarBadge.combine(ai: ai, system: system, foreground: foreground))
+        let badge = groups.isEmpty ? system : SystemMenuBarBadge.combine(
+            ai: MenuBarBadge.render(groups), system: system, foreground: foreground
+        )
+        Image(nsImage: badge)
             .renderingMode(.original)
-            .accessibilityLabel("Codex 세션 \(model.bar(.codex, minutes: 300)), 주간 \(model.bar(.codex, minutes: 10080)). Claude 세션 \(model.bar(.claude, minutes: 300)), 주간 \(model.bar(.claude, minutes: 10080)). \(systemDescription)")
+            .accessibilityLabel((quotaDescriptions + [systemDescription]).joined(separator: ". "))
     }
     private var systemDescription: String {
         guard let s = monitor.sample else { return "시스템 지표 측정 중" }
@@ -139,12 +193,17 @@ struct QuotaView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack { Text("얼마나 더 쓸 수 있지?").font(.title3.bold()); Spacer(); if model.busy { ProgressView().controlSize(.small) } }
-            if !model.enabled {
-                Text("Codex·Claude의 남은 한도와 리셋 시간을 한눈에 확인하세요.").foregroundStyle(.secondary)
-                Text("기존 Codex·Claude Code 로그인으로 서비스에 직접 연결합니다. 로그인 정보는 기기에서 읽고, 한도 조회에만 사용합니다. Claude 연결 시 macOS 키체인 접근을 요청할 수 있습니다.").font(.caption).foregroundStyle(.secondary)
+            if model.selectedProviders.isEmpty {
+                Text("설정에서 한도를 확인할 서비스를 켜세요.").foregroundStyle(.secondary)
+            } else if !model.enabled {
+                Text("남은 한도와 리셋 시간을 한눈에 확인하세요.").foregroundStyle(.secondary)
+                Text("선택한 서비스의 기존 로그인으로 연결합니다. 로그인 정보는 한도 조회에만 사용합니다.").font(.caption).foregroundStyle(.secondary)
+                if model.selectedProviders.contains(.claude) {
+                    Text("Claude 연결 시 macOS 키체인 접근을 요청할 수 있습니다.").font(.caption).foregroundStyle(.secondary)
+                }
                 Button("한도 확인 시작") { model.connect() }.buttonStyle(.borderedProminent)
             } else {
-                ForEach(Provider.allCases, id: \.self) { provider in card(provider) }
+                ForEach(model.selectedProviders, id: \.self) { provider in card(provider) }
             }
             QuotaFooterView(model: model, monitor: model.systemMonitor)
         }
@@ -185,8 +244,20 @@ struct ConnectionView: View {
             Text("한도 연결").font(.title2.bold())
             Text("AgentMeter \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "개발 버전")")
                 .font(.caption).foregroundStyle(.secondary)
+            Section("한도 조회 서비스") {
+                ForEach(Provider.allCases, id: \.self) { provider in
+                    Toggle(provider.title, isOn: Binding(
+                        get: { model.selectedProviders.contains(provider) },
+                        set: { model.setTracking(provider, enabled: $0) }
+                    ))
+                }
+                Text("끈 서비스는 한도를 조회하지 않으며 메뉴 막대와 팝업에서 숨깁니다.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Text("Codex·Claude Code에 로그인한 구독 계정을 사용합니다. 인증정보를 새로 저장하거나 외부 CLI를 실행하지 않습니다.").font(.caption).foregroundStyle(.secondary)
-            Button("로그인 정보 연결 / 키체인 접근 허용") { model.connect() }.disabled(model.busy)
+            Button(model.selectedProviders.contains(.claude) ? "로그인 정보 연결 / 키체인 접근 허용" : "로그인 정보 연결") {
+                model.connect()
+            }.disabled(model.busy || model.selectedProviders.isEmpty)
             Button("연결 해제") { model.disconnect() }
             DisclosureGroup("사용자 지정 로그인 폴더") {
                 TextField("Codex 홈", text: $model.codexHome)

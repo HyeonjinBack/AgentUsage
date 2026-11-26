@@ -10,7 +10,9 @@ struct QuotaFooterView: View {
         VStack(spacing: 12) {
             if model.enabled {
                 HStack(spacing: 8) {
-                    Text(updateStatus)
+                    if !model.selectedProviders.isEmpty {
+                        Text(updateStatus)
+                    }
                     Spacer()
                     if let sample = monitor.sample, let battery = sample.battery {
                         let percent = String(format: "%.0f%%", battery)
@@ -25,9 +27,9 @@ struct QuotaFooterView: View {
             }
 
             HStack(spacing: 6) {
-                if model.enabled {
+                if model.enabled && !model.selectedProviders.isEmpty {
                     Button {
-                        Task { await model.refresh() }
+                        model.refresh()
                     } label: {
                         Label("새로고침", systemImage: "arrow.triangle.2.circlepath")
                             .frame(maxWidth: .infinity)
@@ -38,7 +40,7 @@ struct QuotaFooterView: View {
                     Button {
                         model.paused.toggle()
                         if !model.paused {
-                            Task { await model.refresh() }
+                            model.refresh()
                         }
                     } label: {
                         Label(model.paused ? "재개" : "일시 중지", systemImage: model.paused ? "play.fill" : "pause.fill")

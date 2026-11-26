@@ -17,6 +17,36 @@ private actor CouponTransport: QuotaTransport {
     func captured() -> [URLRequest] { requests }
 }
 
+private actor PendingUsageTransport: QuotaTransport {
+    let started: XCTestExpectation
+    private var usageResponse: CheckedContinuation<Void, Never>?
+    private var released = false
+    private(set) var paths: [String] = []
+
+    init(started: XCTestExpectation) { self.started = started }
+
+    func send(_ request: URLRequest) async throws -> HTTPResult {
+        let path = request.url?.path ?? ""
+        paths.append(path)
+        if path == "/backend-api/wham/usage" {
+            if !released {
+                await withCheckedContinuation {
+                    usageResponse = $0
+                    started.fulfill()
+                }
+            }
+            return HTTPResult(data: Data(#"{"rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":18000}}}"#.utf8), status: 200)
+        }
+        return HTTPResult(data: Data(#"{"available_count":0}"#.utf8), status: 200)
+    }
+
+    func finishUsage() {
+        released = true
+        usageResponse?.resume()
+        usageResponse = nil
+    }
+}
+
 final class ResetCreditsTests: XCTestCase {
     func data(_ object: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: object) }
     func row(_ id: String, expiry: Any = "2027-01-02T12:30:00.123456Z", status: String = "available") -> [String: Any] {
@@ -119,5 +149,23 @@ final class ResetCreditsTests: XCTestCase {
         let requests = await transport.captured()
         XCTAssertEqual(requests.filter { $0.url?.path.hasSuffix("/usage") == true }.count, 2)
         XCTAssertEqual(requests.filter { $0.url?.path.hasSuffix("/rate-limit-reset-credits") == true }.count, 1)
+    }
+
+    func testCancelDuringCodexUsageDoesNotStartCouponRequest() async {
+        let started = expectation(description: "Codex usage request started")
+        let transport = PendingUsageTransport(started: started)
+        let service = DirectQuotaService(transport: transport)
+        let task = Task {
+            try await service.fetch(provider: .codex, credential: OAuthCredential(accessToken: "synthetic", accountID: nil))
+        }
+        await fulfillment(of: [started], timeout: 2)
+        task.cancel()
+        await transport.finishUsage()
+        guard case .failure(let error) = await task.result else {
+            return XCTFail("Cancelled usage request returned a snapshot")
+        }
+        XCTAssertTrue(error is CancellationError)
+        let paths = await transport.paths
+        XCTAssertEqual(paths, ["/backend-api/wham/usage"])
     }
 }

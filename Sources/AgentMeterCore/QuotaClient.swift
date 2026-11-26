@@ -92,6 +92,7 @@ public actor DirectQuotaService {
         else { credentials.removeAll() }
     }
     public func fetch(provider: Provider, locations: CredentialLocations = CredentialLocations(), allowKeychainPrompt: Bool = false) async throws -> QuotaSnapshot {
+        try Task.checkCancellation()
         if let date = retryDates[provider], date > Date() { throw QuotaError.rateLimited }
         let home = provider == .codex ? locations.codexHome : locations.claudeHome
         let key = provider.rawValue + ":" + home.standardizedFileURL.path
@@ -107,6 +108,7 @@ public actor DirectQuotaService {
                 throw QuotaError.connectionRequired
             }
             credential = try credentialLoader.read(provider: provider, locations: locations, allowPrompt: allowKeychainPrompt)
+            try Task.checkCancellation()
             guard credential.expiresAt.map({ $0 > Date() }) ?? true else { throw QuotaError.expiredLogin }
             if provider == .claude { credentials[key] = credential }
         }
@@ -117,6 +119,7 @@ public actor DirectQuotaService {
         }
     }
     func fetch(provider: Provider, credential: OAuthCredential) async throws -> QuotaSnapshot {
+        try Task.checkCancellation()
         if let date = retryDates[provider], date > Date() { throw QuotaError.rateLimited }
         let endpoint = provider == .codex ? "https://chatgpt.com/backend-api/wham/usage" : "https://api.anthropic.com/api/oauth/usage"
         let request = makeRequest(endpoint: endpoint, provider: provider, credential: credential)
@@ -125,6 +128,7 @@ public actor DirectQuotaService {
         catch let e as QuotaError { throw e }
         catch let e as URLError { throw e.code == .timedOut ? QuotaError.timeout : QuotaError.network }
         catch { throw QuotaError.network }
+        try Task.checkCancellation()
         switch result.status {
         case 200:
             var snapshot = try QuotaClient.decode(result.data, provider: provider)
@@ -150,13 +154,14 @@ public actor DirectQuotaService {
         request.httpMethod = "GET"
         request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("AgentMeter/0.2.7", forHTTPHeaderField: "User-Agent")
+        request.setValue("AgentMeter/0.2.8", forHTTPHeaderField: "User-Agent")
         if provider == .codex, let account = credential.accountID { request.setValue(account, forHTTPHeaderField: "ChatGPT-Account-Id") }
         if provider == .claude { request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta") }
         return request
     }
 
     private func fetchResetCredits(credential: OAuthCredential) async throws -> RateLimitResetCredits {
+        try Task.checkCancellation()
         if let retry = resetCreditRetryDate, retry > Date() { throw QuotaError.rateLimited }
         // Read-only details endpoint used by Codex. Never call the /consume route.
         let request = makeRequest(endpoint: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
