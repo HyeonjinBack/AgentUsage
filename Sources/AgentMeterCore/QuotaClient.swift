@@ -150,7 +150,7 @@ public actor DirectQuotaService {
         request.httpMethod = "GET"
         request.setValue("Bearer \(credential.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("AgentMeter/0.2.6", forHTTPHeaderField: "User-Agent")
+        request.setValue("AgentMeter/0.2.7", forHTTPHeaderField: "User-Agent")
         if provider == .codex, let account = credential.accountID { request.setValue(account, forHTTPHeaderField: "ChatGPT-Account-Id") }
         if provider == .claude { request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta") }
         return request

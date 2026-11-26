@@ -145,16 +145,8 @@ struct QuotaView: View {
                 Button("한도 확인 시작") { model.connect() }.buttonStyle(.borderedProminent)
             } else {
                 ForEach(Provider.allCases, id: \.self) { provider in card(provider) }
-                SystemMetricsView(monitor: model.systemMonitor)
             }
-            Divider()
-            HStack {
-                Button("새로고침") { Task { await model.refresh() } }.disabled(model.busy || !model.enabled || model.paused)
-                Button(model.paused ? "재개" : "일시 중지") { model.paused.toggle(); if !model.paused { Task { await model.refresh() } } }
-                Spacer()
-                SettingsLink { Image(systemName: "gearshape") }
-                Button("종료") { NSApp.terminate(nil) }
-            }.buttonStyle(.borderless).font(.caption)
+            QuotaFooterView(model: model, monitor: model.systemMonitor)
         }
     }
     func card(_ provider: Provider) -> some View {
@@ -183,20 +175,6 @@ struct QuotaView: View {
                 }
             }
         }.padding(14).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
-    }
-}
-struct SystemMetricsView: View {
-    @ObservedObject var monitor: SystemMonitor
-    var body: some View {
-        if let s = monitor.sample {
-            HStack {
-                Label(s.cpu.map { String(format: "CPU %.0f%%", $0) } ?? "CPU …", systemImage: "cpu")
-                Spacer()
-                Text(s.memoryUsed >= 0 ? String(format: "%.1f GB", s.memoryUsed / 1e9) : "메모리 —")
-                Spacer()
-                Label(s.battery.map { String(format: "%.0f%%", $0) } ?? "—", systemImage: s.onAC ? "battery.100percent.bolt" : "battery.75percent")
-            }.font(.caption).foregroundStyle(.secondary)
-        }
     }
 }
 struct ConnectionView: View {
